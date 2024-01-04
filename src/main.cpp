@@ -7,6 +7,7 @@
 
 #include "Handshake.h"
 
+#define SERIAL_MIDI_RATE 31250
 #define SERIAL2_RATE 115200   // 
 
 BLEMIDI_CREATE_DEFAULT_INSTANCE()
@@ -27,8 +28,9 @@ void OnConnected();
 void setup()
 { 
   pinMode(LED_BUILTIN, OUTPUT);
-  digitalWrite(LED_BUILTIN, HIGH);
+  digitalWrite(LED_BUILTIN, LOW);
 
+  Serial.begin(SERIAL_MIDI_RATE);
   Serial2.begin(SERIAL2_RATE, SERIAL_8E1);
 
   MIDI.begin();
@@ -44,10 +46,10 @@ void setup()
   });
 
   MIDI.setHandleNoteOn([](byte channel, byte note, byte velocity) {
-    digitalWrite(LED_BUILTIN, LOW);
+    // digitalWrite(LED_BUILTIN, LOW);
   });
   MIDI.setHandleNoteOff([](byte channel, byte note, byte velocity) {
-    digitalWrite(LED_BUILTIN, HIGH);
+    // digitalWrite(LED_BUILTIN, HIGH);
   });
 
   BLEAddress bleAddress = BLEDevice::getAddress();
@@ -60,27 +62,79 @@ void setup()
 
 
 
-void sendBleAddress(byte* data, int length)
+void Serial2WriteData(byte* data, int length)
 {
   for (int i = 0; i < length; i++)
       Serial2.write(*(data+i));
 }
 
+
+byte midiSerialReadBuffer_[10];
+byte *midiSerialReadPos_;
+
 // -----------------------------------------------------------------------------
 //
 // -----------------------------------------------------------------------------
+bool isOn_ = false;
 void loop()
 {
   // OnConnected();
 
   MIDI.read();
 
-  if (isConnected && (millis() - t0) > 1000)
+  // if (isConnected && (millis() - t0) > 1000)
+  // {
+  //   t0 = millis();
+
+  //   if (isOn_)
+  //   {
+  //     MIDI.sendNoteOff (60, 0, 1);
+  //     digitalWrite(LED_BUILTIN, HIGH);
+  //   }
+  //   else
+  //   {
+  //     MIDI.sendNoteOn (60, 100, 1); // note 60, velocity 100 on channel 1
+  //     digitalWrite(LED_BUILTIN, LOW);
+  //   }
+
+  //   isOn_ = !isOn_;
+  // }
+
+  if (Serial.available())
   {
-    t0 = millis();
+      byte b = Serial.read();
 
-    MIDI.sendNoteOn (60, 100, 1); // note 60, velocity 100 on channel 1
+      if (b >= 0x80u)
+      {
+        midiSerialReadPos_ = midiSerialReadBuffer_;
+      }
+      *midiSerialReadPos_ = b;
+      midiSerialReadPos_++;      
+     
 
+      if (isConnected)
+      {
+        if (midiSerialReadPos_ - midiSerialReadBuffer_ >= 3)
+        {
+          switch (midiSerialReadBuffer_[0] & 0xF0u)
+          {
+            case 0x80:
+              {
+                MIDI.sendNoteOff(midiSerialReadBuffer_[1], midiSerialReadBuffer_[2], midiSerialReadBuffer_[0] & 0x0Fu);
+                digitalWrite(LED_BUILTIN, HIGH);
+              }
+              break;
+            case 0x90:
+              {
+                MIDI.sendNoteOn(midiSerialReadBuffer_[1], midiSerialReadBuffer_[2], midiSerialReadBuffer_[0] & 0x0Fu);
+                digitalWrite(LED_BUILTIN, LOW);
+              }
+              break;
+          }
+
+          midiSerialReadPos_ = midiSerialReadBuffer_;     
+      }
+     }
   }
 
   handshake_->Update();
@@ -88,7 +142,7 @@ void loop()
 
 void OnConnected()
 {
-    digitalWrite(LED_BUILTIN, HIGH);
-    sendBleAddress((byte*)bleAddressString, strlen(bleAddressString));
     digitalWrite(LED_BUILTIN, LOW);
+    Serial2WriteData((byte*)bleAddressString, strlen(bleAddressString));
+    digitalWrite(LED_BUILTIN, HIGH);
 }
