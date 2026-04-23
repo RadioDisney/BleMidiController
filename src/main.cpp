@@ -7,6 +7,10 @@
 
 #include "Handshake.h"
 
+#ifndef LED_BUILTIN
+#define LED_BUILTIN 38
+#endif
+
 #define SERIAL2_MIDI_RATE 31250
 #define SERIAL_RATE 115200   // 
 
@@ -32,8 +36,8 @@ void setup()
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, LOW);
 
-  Serial2.begin(SERIAL2_MIDI_RATE);
-  Serial.begin(SERIAL_RATE, SERIAL_8E1);
+  Serial2.begin(SERIAL2_MIDI_RATE, SERIAL_8N1, G1, G2);
+  Serial.begin(SERIAL_RATE);
 
   MIDI.begin();
 
