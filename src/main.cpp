@@ -7,11 +7,14 @@
 
 #include "Handshake.h"
 
-#include <OneButton.h>
+#include <AceButton.h>
 
 #ifndef LED_BUILTIN
 #define LED_BUILTIN 38
 #endif
+
+#define KEY1_PIN 0
+#define KEY2_PIN 17
 
 #define SERIAL2_MIDI_RATE 31250
 #define SERIAL_RATE 115200   // 
@@ -24,10 +27,11 @@ bool isConnected = false;
 char bleAddressString[80];
 // Handshake *handshake_;
 
-OneButton key1, key2;
+using namespace ace_button;
 
-void OnKey1();
-void OnKey2();
+AceButton key1((uint8_t)KEY1_PIN), key2((uint8_t)KEY2_PIN);
+
+void OnKey(AceButton* button, uint8_t eventType, uint8_t buttonState);
 
 // -----------------------------------------------------------------------------
 // When BLE connected, LED will turn on (indication that connection was successful)
@@ -53,28 +57,30 @@ void setup()
   // handshake_ = new Handshake(4);
   // handshake_->onConnected_ = OnConnected;
 
-  key1.setup(0, INPUT_PULLUP, true);
-  key1.attachPress(OnKey1);
-  key1.attachClick(OnKey1);
+  pinMode(KEY1_PIN, INPUT_PULLUP);
+  pinMode(KEY2_PIN, INPUT_PULLUP);
 
-  key2.setup(17, INPUT_PULLUP, true);
-  key2.attachPress((OnKey2));
-  key2.attachClick((OnKey2));
+  ButtonConfig* buttonConfig = ButtonConfig::getSystemButtonConfig();
+  buttonConfig->setEventHandler(OnKey);
 }
 
-void OnKey1()
+void OnKey(AceButton* button, uint8_t eventType, uint8_t buttonState)
 {
   if (isConnected)
   {
-    MIDI.sendNoteOn(60, 100, 1); // note 60, velocity 100 on channel 1
-  }
-}
-
-void OnKey2()
-{
-  if (isConnected)
-  {
-    MIDI.sendNoteOff(60, 0, 1); // note 60, velocity 0 on channel 1
+    midi::DataByte pitch = 64;
+    pitch  = button == &key1 ? 31 : 63;
+    switch (eventType)
+    {
+    case AceButton::kEventPressed:
+      MIDI.sendNoteOn(pitch, 100, 1); 
+      break;
+    case AceButton::kEventReleased:
+      MIDI.sendNoteOff(pitch, 0, 1);
+      break;
+    default:
+      break;
+    }
   }
 }
 
@@ -83,8 +89,8 @@ void loop()
   MIDI.read();
 
   // keep watching the push button:
-  key1.tick();
-  key2.tick();
+  key1.check();
+  key2.check();
 
   // You can implement other code in here or just wait a while
   delay(10);
