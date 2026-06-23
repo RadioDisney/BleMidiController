@@ -11,6 +11,11 @@ enum ChainKeyEvent
   CHAIN_KEY_EVENT_SINGLE_PRESS,
   CHAIN_KEY_EVENT_DOUBLE_PRESS,
   CHAIN_KEY_EVENT_LONG_PRESS,
+  // Level events produced when polling in non-report mode (protocol cmd 0xE1).
+  // In this mode the device only reports the raw pressed level (0/1), so the
+  // manager performs edge detection and emits these events.
+  CHAIN_KEY_EVENT_PRESSED,
+  CHAIN_KEY_EVENT_RELEASED,
 };
 
 // -----------------------------------------------------------------------------
@@ -41,6 +46,8 @@ public:
 
   // Call from loop(). Drains the button press queue of each key and fires
   // the registered handler for every event.
+  // In report mode it reads active 0xE0 press packets; in polling mode it
+  // queries each key via 0xE1 and emits PRESSED/RELEASED level events.
   void update();
 
   // Register the button event handler.
@@ -51,6 +58,11 @@ public:
 
   // Device id (position on the chain, starts at 1) of the n-th key.
   uint16_t keyId(uint8_t index) const;
+
+  // Enable polling mode (non-report). When enabled, update() queries each key
+  // via 0xE1 instead of reading active 0xE0 reports.
+  void setPollingMode(bool enabled) { pollingMode_ = enabled; }
+  bool pollingMode() const { return pollingMode_; }
 
   // ----- RGB helpers (per key device) -------------------------------------
 
@@ -70,6 +82,15 @@ public:
   // Set the button operating mode (report / none-report).
   bool setButtonMode(uint16_t deviceId, chain_button_mode_t mode);
 
+  // Query the current button operating mode (protocol cmd 0xE5).
+  // Writes the mode (CHAIN_BUTTON_NONE_REPORT_MODE / CHAIN_BUTTON_REPORT_MODE)
+  // and returns true on success.
+  bool getButtonMode(uint16_t deviceId, chain_button_mode_t &mode);
+
+  // Query the raw button status (protocol cmd 0xE1, used in non-report mode).
+  // status: 0 = released, 1 = pressed. Returns true on success.
+  bool getButtonStatus(uint16_t deviceId, uint8_t &status);
+
   // Access the underlying Chain instance for anything not covered above.
   Chain &chain() { return chain_; }
 
@@ -86,8 +107,13 @@ private:
 
   EventHandler eventHandler_;
 
+  // Non-report polling state.
+  bool pollingMode_ = false;
+  uint8_t *prevStatus_;         // per-key last known pressed level (owned)
+
   void enumerateDevices();
   void fireButtonEvents(uint16_t deviceId);
+  void pollButtonStatus(uint16_t deviceId, uint8_t index);
 };
 
 #endif

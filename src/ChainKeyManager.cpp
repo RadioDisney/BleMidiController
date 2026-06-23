@@ -10,8 +10,10 @@ ChainKeyManager::ChainKeyManager(uint8_t rxPin, uint8_t txPin,
 
   deviceList_ = NULL;
   keyIds_ = NULL;
+  prevStatus_ = NULL;
   keyCount_ = 0;
   eventHandler_ = NULL;
+  pollingMode_ = false;
 }
 
 ChainKeyManager::~ChainKeyManager()
@@ -29,6 +31,11 @@ ChainKeyManager::~ChainKeyManager()
   {
     free(keyIds_);
     keyIds_ = NULL;
+  }
+  if (prevStatus_ != NULL)
+  {
+    free(prevStatus_);
+    prevStatus_ = NULL;
   }
   eventHandler_ = NULL;
 }
@@ -88,6 +95,9 @@ void ChainKeyManager::enumerateDevices()
       keyIds_[keyCount_++] = deviceList_->devices[i].id;
     }
   }
+
+  // Allocate per-key previous-status storage used by non-report polling.
+  prevStatus_ = (uint8_t *)calloc(deviceNum, sizeof(uint8_t));
 }
 
 uint16_t ChainKeyManager::keyId(uint8_t index) const
@@ -103,7 +113,47 @@ void ChainKeyManager::update()
 {
   for (uint8_t i = 0; i < keyCount_; i++)
   {
-    fireButtonEvents(keyIds_[i]);
+    if (pollingMode_)
+    {
+      pollButtonStatus(keyIds_[i], i);
+    }
+    else
+    {
+      fireButtonEvents(keyIds_[i]);
+    }
+  }
+}
+
+void ChainKeyManager::pollButtonStatus(uint16_t deviceId, uint8_t index)
+{
+  if (prevStatus_ == NULL)
+  {
+    return;
+  }
+
+  uint8_t status = 0;
+  if (!getButtonStatus(deviceId, status))
+  {
+    // Query failed; keep last known state to avoid spurious events.
+    return;
+  }
+
+  uint8_t prev = prevStatus_[index];
+  prevStatus_[index] = status;
+
+  if (eventHandler_ == NULL)
+  {
+    return;
+  }
+
+  // Emit edge events only on level transitions.
+  if (status == 1 && prev == 0)
+  {
+    eventHandler_((uint8_t)deviceId, CHAIN_KEY_EVENT_PRESSED);
+  }
+  else if (status == 0 && prev == 1)
+  {
+    eventHandler_((uint8_t)deviceId, CHAIN_KEY_EVENT_RELEASED);
   }
 }
 
@@ -177,4 +227,16 @@ bool ChainKeyManager::setButtonMode(uint16_t deviceId, chain_button_mode_t mode)
   uint8_t operationStatus = 0;
   chain_status_t status = chain_.setKeyButtonMode(deviceId, mode, &operationStatus);
   return (status == CHAIN_OK && operationStatus == 1);
+}
+
+bool ChainKeyManager::getButtonMode(uint16_t deviceId, chain_button_mode_t &mode)
+{
+  chain_status_t status = chain_.getKeyButtonMode(deviceId, &mode);
+  return (status == CHAIN_OK);
+}
+
+bool ChainKeyManager::getButtonStatus(uint16_t deviceId, uint8_t &status)
+{
+  chain_status_t s = chain_.getKeyButtonStatus(deviceId, &status);
+  return (s == CHAIN_OK);
 }

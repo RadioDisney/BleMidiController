@@ -41,16 +41,31 @@ ChainKeyManager chainKey;
 
 void OnChainKey(uint8_t deviceId, ChainKeyEvent event)
 {
+  Serial.printf("Chain Key event: deviceId=%d, event=%d\r\n", deviceId, event);
   // Use the key's position on the chain to derive a MIDI note.
   midi::DataByte pitch = 60 + deviceId; // base C4 + position offset
 
   switch (event)
   {
+  // Non-report (polling) mode: the device only returns the raw pressed level
+  // via cmd 0xE1, so we get pressed/released edges. Map them to NoteOn/NoteOff.
+  case CHAIN_KEY_EVENT_PRESSED:
+    if (isConnected) {
+      MIDI.sendNoteOn(pitch, 100, 1);
+    }
+    chainKey.setColor(deviceId, 0x00, 0xFF, 0x00); // green while held
+    break;
+  case CHAIN_KEY_EVENT_RELEASED:
+    if (isConnected) {
+      MIDI.sendNoteOff(pitch, 0, 1);
+    }
+    chainKey.setColor(deviceId, 0x20, 0x20, 0x20); // back to idle
+    break;
+  // Report mode events (kept for when report mode is used):
   case CHAIN_KEY_EVENT_SINGLE_PRESS:
     if (isConnected) {
       MIDI.sendNoteOn(pitch, 100, 1);
     }
-    // visual feedback on the key's RGB
     chainKey.setColor(deviceId, 0x00, 0xFF, 0x00); // green
     break;
   case CHAIN_KEY_EVENT_DOUBLE_PRESS:
@@ -108,6 +123,11 @@ void setup()
   chainKey.setEventHandler(OnChainKey);
   if (chainKey.begin())
   {
+    // Switch the whole bus into non-report mode: the keys will NOT push 0xE0
+    // press packets. Instead the host must poll each key with the 0xE1 query
+    // (CHAIN_BUTTON_GET_STATUS) and the key answers with its pressed level.
+    chainKey.setPollingMode(true);
+
     for (uint8_t i = 0; i < chainKey.keyCount(); i++)
     {
       uint16_t id = chainKey.keyId(i);
@@ -117,14 +137,31 @@ void setup()
       // configure double-click (200ms) and long-press (3s) detection
       chainKey.setTriggerInterval(id, BUTTON_DOUBLE_CLICK_TIME_200MS,
                                   BUTTON_LONG_PRESS_TIME_3S);
-      // enable event reporting mode
-      chainKey.setButtonMode(id, CHAIN_BUTTON_REPORT_MODE);
+      // non-report mode: host polls button status via cmd 0xE1
+      chainKey.setButtonMode(id, CHAIN_BUTTON_NONE_REPORT_MODE);
+
+      // Read back the button mode (protocol cmd 0xE5) to verify it was applied.
+      // 0 = CHAIN_BUTTON_NONE_REPORT_MODE (non reporting), 1 = CHAIN_BUTTON_REPORT_MODE
+      chain_button_mode_t mode = CHAIN_BUTTON_REPORT_MODE;
+      if (chainKey.getButtonMode(id, mode))
+      {
+        Serial.printf("Chain Key id=%d mode readback=%d (%s)\r\n", id, mode,
+                      mode == CHAIN_BUTTON_NONE_REPORT_MODE   ? "none-report"
+                      : mode == CHAIN_BUTTON_REPORT_MODE      ? "report"
+                                                               : "unknown");
+      }
+      else
+      {
+        Serial.printf("Chain Key id=%d getButtonMode failed\r\n", id);
+      }
     }
   }
 }
 
 void OnKey(AceButton* button, uint8_t eventType, uint8_t buttonState)
 {
+  Serial.printf("Button event: button=%p, eventType=%d, buttonState=%d\r\n",
+                button, eventType, buttonState);
   if (isConnected)
   {
     midi::DataByte pitch = 64;
