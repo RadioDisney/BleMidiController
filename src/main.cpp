@@ -39,11 +39,25 @@ void OnKey(AceButton* button, uint8_t eventType, uint8_t buttonState);
 // -----------------------------------------------------------------------------
 ChainKeyManager chainKey;
 
+uint8_t keyId2Pitch[4] = 
+{
+  64, // key 1 -> MIDI note 60 (C4)
+  67, // key 2 -> MIDI note 62 (D4)
+  69, // key 3 -> MIDI note 64 (E4)
+  72, // key 4 -> MIDI note 65 (F4)
+};
+
 void OnChainKey(uint8_t deviceId, ChainKeyEvent event)
 {
   Serial.printf("Chain Key event: deviceId=%d, event=%d\r\n", deviceId, event);
   // Use the key's position on the chain to derive a MIDI note.
-  midi::DataByte pitch = 60 + deviceId; // base C4 + position offset
+  if (deviceId < 1 || deviceId > 4)
+  {
+    Serial.printf("Chain Key event: deviceId=%d out of range\r\n", deviceId);
+    return;
+  }
+  midi::DataByte pitch = keyId2Pitch[deviceId - 1]; // deviceId starts at 1, array index starts at 0
+  
 
   switch (event)
   {
@@ -106,6 +120,30 @@ void setup()
     isConnected = false;
   });
 
+  // setHandleMessage belongs to MidiInterface (the global MIDI object),
+  // not to the BLEMIDI transport. MidiMessage is a nested typedef of
+  // MidiInterface, so reach it via decltype(MIDI)::MidiMessage.
+  MIDI.setHandleMessage([](const decltype(MIDI)::MidiMessage &message)
+                        {
+                          switch (message.type)
+                          {
+                          case midi::SystemExclusive:
+                            Serial.printf("SysEx : ");
+                            for (int i = 0; i < message.length; i++)
+                            {
+                              Serial.printf("%02X ", message.sysexArray[i]);
+                            }
+                            Serial.println();
+
+                            break;
+
+                          default:
+                            Serial.printf("MIDI msg: type=%d channel=%d data1=%d data2=%d\r\n",
+                                          message.type, message.channel, message.data1, message.data2);
+                            break;
+                          }
+                        });
+
   BLEAddress bleAddress = BLEDevice::getAddress();
   
   sprintf(bleAddressString, "\xF0%s\xF7", bleAddress.toString().c_str());
@@ -165,7 +203,7 @@ void OnKey(AceButton* button, uint8_t eventType, uint8_t buttonState)
   if (isConnected)
   {
     midi::DataByte pitch = 64;
-    pitch  = button == &key1 ? 31 : 63;
+    pitch  = button == &key1 ? 62 : 60;
     switch (eventType)
     {
     case AceButton::kEventPressed:

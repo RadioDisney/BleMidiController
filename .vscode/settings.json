@@ -9,5 +9,6 @@
         "vector": "cpp",
         "string_view": "cpp",
         "initializer_list": "cpp"
-    }
+    },
+    "cmake.sourceDirectory": "/Users/huxunxun/Documents/PlatformIO/Projects/BleMidiController/core/packages/framework-arduinoespressif32"
 }
