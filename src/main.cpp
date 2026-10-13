@@ -47,6 +47,41 @@ uint8_t keyId2Pitch[4] =
   72, // key 4 -> MIDI note 65 (F4)
 };
 
+// ---------------------------------------------------------------------------
+// Chain Joystick -> MIDI portamento (滑音)
+//   CC#5  : Portamento Time, 滑音速度 (值越大滑音时间越长 = 滑得越慢)
+//   CC#54 : Portamento Control, 起始音 (值 = 滑音起始音符, 新 NoteOn 从该音滑向目标音)
+//   CC#65 : Portamento On/Off (多数音源需要打开才有滑音效果, 可用宏关闭)
+// ---------------------------------------------------------------------------
+#define MIDI_CC_PORTAMENTO_TIME 5     // CC#5  滑音速度
+#define MIDI_CC_PORTAMENTO_CTRL 54    // CC#54 起始音 (Portamento Control)
+#define MIDI_CC_PORTAMENTO_ONOFF 65   // CC#65 滑音开关
+#define ENABLE_PORTAMENTO_ONOFF_CC 1  // 0 = 只发 CC#5 / CC#54, 不发开关
+
+#define JOY_Y_DEADZONE 16   // 摇杆 Y 轴死区 (映射值 -127..127)
+#define JOY_Y_STEP 120      // 累积步进阈值, 越小滑音速度调整越快
+#define JOY_Y_INVERT 0      // 1 = 翻转上下方向
+
+uint8_t portamentoTime = 0;  // 当前 CC#5 值 (0-127)
+int glideAccum = 0;          // Y 轴偏移累积器
+int lastNote = -1;           // 上一个按下的音符, 作为滑音起始音
+
+// 发送带滑音的 NoteOn: 先用 CC#54 指定起始音 (上一个音符), 再触发新音符,
+// 音源即按 CC#5 设定的速度从起始音滑向新音符.
+void sendGlideNoteOn(midi::DataByte pitch, uint8_t velocity)
+{
+  if (!isConnected)
+  {
+    return;
+  }
+  if (lastNote >= 0 && portamentoTime > 0)
+  {
+    MIDI.sendControlChange(MIDI_CC_PORTAMENTO_CTRL, (midi::DataByte)lastNote, 1);
+  }
+  MIDI.sendNoteOn(pitch, velocity, 1);
+  lastNote = pitch;
+}
+
 void OnChainKey(uint8_t deviceId, ChainKeyEvent event)
 {
   Serial.printf("Chain Key event: deviceId=%d, event=%d\r\n", deviceId, event);
@@ -64,9 +99,7 @@ void OnChainKey(uint8_t deviceId, ChainKeyEvent event)
   // Non-report (polling) mode: the device only returns the raw pressed level
   // via cmd 0xE1, so we get pressed/released edges. Map them to NoteOn/NoteOff.
   case CHAIN_KEY_EVENT_PRESSED:
-    if (isConnected) {
-      MIDI.sendNoteOn(pitch, 100, 1);
-    }
+    sendGlideNoteOn(pitch, 100);
     chainKey.setColor(deviceId, 0x00, 0xFF, 0x00); // green while held
     break;
   case CHAIN_KEY_EVENT_RELEASED:
@@ -77,15 +110,11 @@ void OnChainKey(uint8_t deviceId, ChainKeyEvent event)
     break;
   // Report mode events (kept for when report mode is used):
   case CHAIN_KEY_EVENT_SINGLE_PRESS:
-    if (isConnected) {
-      MIDI.sendNoteOn(pitch, 100, 1);
-    }
+    sendGlideNoteOn(pitch, 100);
     chainKey.setColor(deviceId, 0x00, 0xFF, 0x00); // green
     break;
   case CHAIN_KEY_EVENT_DOUBLE_PRESS:
-    if (isConnected) {
-      MIDI.sendNoteOn(pitch + 12, 100, 1);
-    }
+    sendGlideNoteOn(pitch + 12, 100);
     chainKey.setColor(deviceId, 0x00, 0x00, 0xFF); // blue
     break;
   case CHAIN_KEY_EVENT_LONG_PRESS:
@@ -97,6 +126,58 @@ void OnChainKey(uint8_t deviceId, ChainKeyEvent event)
   default:
     break;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Chain Joystick: 上下推摇杆 (Y 轴) 调整 CC#5 滑音速度
+// 上推 = 增大滑音时间 (滑得更慢), 下推 = 减小, 松手回中保持当前值.
+// 摇杆 RGB 作为滑音量指示: 0 = 暗红, 127 = 绿.
+// ---------------------------------------------------------------------------
+void OnChainJoystick(uint8_t deviceId, int8_t x, int8_t y)
+{
+#if JOY_Y_INVERT
+  y = -y;
+#endif
+
+  if (abs(y) < JOY_Y_DEADZONE)
+  {
+    glideAccum = 0;  // 回中, 停止调整但保持当前滑音速度
+    return;
+  }
+
+  // 按偏移量累积, 推得越满调整越快
+  glideAccum += y;
+  int steps = glideAccum / JOY_Y_STEP;
+  if (steps == 0)
+  {
+    return;
+  }
+  glideAccum -= steps * JOY_Y_STEP;
+
+  int v = constrain(portamentoTime + steps, 0, 127);
+  if (v == (int)portamentoTime)
+  {
+    glideAccum = 0;  // 已到 0/127 边界, 清累积防止反向突变
+    return;
+  }
+  portamentoTime = (uint8_t)v;
+
+  Serial.printf("Joystick id=%d x=%d y=%d -> CC#%d (portamento time)=%d\r\n",
+                deviceId, x, y, MIDI_CC_PORTAMENTO_TIME, portamentoTime);
+
+  if (isConnected)
+  {
+#if ENABLE_PORTAMENTO_ONOFF_CC
+    MIDI.sendControlChange(MIDI_CC_PORTAMENTO_ONOFF,
+                           portamentoTime > 0 ? 127 : 0, 1);
+#endif
+    MIDI.sendControlChange(MIDI_CC_PORTAMENTO_TIME, portamentoTime, 1);
+  }
+
+  // RGB 指示滑音量: 0 = 红, 127 = 绿
+  uint8_t r = (uint8_t)(255 * (127 - portamentoTime) / 127);
+  uint8_t g = (uint8_t)(255 * portamentoTime / 127);
+  chainKey.setColor(deviceId, r, g, 0x00);
 }
 
 // -----------------------------------------------------------------------------
@@ -159,6 +240,7 @@ void setup()
 
   // ----- Chain Key setup ---------------------------------------------------
   chainKey.setEventHandler(OnChainKey);
+  chainKey.setJoystickEventHandler(OnChainJoystick);
   if (chainKey.begin())
   {
     // Switch the whole bus into non-report mode: the keys will NOT push 0xE0
@@ -193,6 +275,16 @@ void setup()
         Serial.printf("Chain Key id=%d getButtonMode failed\r\n", id);
       }
     }
+
+    // ----- Chain Joystick setup ----------------------------------------------
+    for (uint8_t i = 0; i < chainKey.joystickCount(); i++)
+    {
+      uint16_t id = chainKey.joystickId(i);
+      chainKey.setBrightness(id, 30);
+      // 暗红 = 滑音速度当前为 0 (OnChainJoystick 会随调整变绿)
+      chainKey.setColor(id, 0x20, 0x00, 0x00);
+      Serial.printf("Chain Joystick id=%d ready (push up/down to set glide speed)\r\n", id);
+    }
   }
 }
 
@@ -207,7 +299,7 @@ void OnKey(AceButton* button, uint8_t eventType, uint8_t buttonState)
     switch (eventType)
     {
     case AceButton::kEventPressed:
-      MIDI.sendNoteOn(pitch, 100, 1); 
+      sendGlideNoteOn(pitch, 100); 
       break;
     case AceButton::kEventReleased:
       MIDI.sendNoteOff(pitch, 0, 1);

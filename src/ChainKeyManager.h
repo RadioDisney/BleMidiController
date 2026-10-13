@@ -22,9 +22,10 @@ enum ChainKeyEvent
 // ChainKeyManager
 //
 // A thin wrapper around the M5Chain `Chain` class that takes care of bus
-// initialisation, device enumeration and polling of every Chain Key found on
-// the daisy-chain bus. Call begin() once in setup() and update() in loop().
-// Button events are delivered through a callback in the style of AceButton.
+// initialisation, device enumeration and polling of every Chain Key and
+// Chain Joystick found on the daisy-chain bus. Call begin() once in setup()
+// and update() in loop(). Button events are delivered through a callback in
+// the style of AceButton; joystick samples through a separate callback.
 // -----------------------------------------------------------------------------
 class ChainKeyManager
 {
@@ -58,6 +59,27 @@ public:
 
   // Device id (position on the chain, starts at 1) of the n-th key.
   uint16_t keyId(uint8_t index) const;
+
+  // ----- Chain Joystick support --------------------------------------------
+
+  // Signature of the joystick sample callback, fired from update() on every
+  // successful joystick poll.
+  //   deviceId : id (position) of the joystick device on the chain
+  //   x, y     : mapped axis position, -127..127 (0 = center)
+  typedef void (*JoystickEventHandler)(uint8_t deviceId, int8_t x, int8_t y);
+
+  // Register the joystick sample handler.
+  void setJoystickEventHandler(JoystickEventHandler handler) { joystickEventHandler_ = handler; }
+
+  // Number of Chain Joystick devices detected on the bus.
+  uint8_t joystickCount() const { return joystickCount_; }
+
+  // Device id (position on the chain, starts at 1) of the n-th joystick.
+  uint16_t joystickId(uint8_t index) const;
+
+  // Read the mapped (-127..127) X/Y position of a joystick
+  // (protocol cmd 0x35). Returns true on success.
+  bool getJoystickXY(uint16_t deviceId, int8_t &x, int8_t &y);
 
   // Enable polling mode (non-report). When enabled, update() queries each key
   // via 0xE1 instead of reading active 0xE0 reports.
@@ -105,7 +127,11 @@ private:
   uint16_t *keyIds_;            // ids of devices that are keys (owned)
   uint8_t keyCount_;
 
+  uint16_t *joystickIds_;       // ids of devices that are joysticks (owned)
+  uint8_t joystickCount_;
+
   EventHandler eventHandler_;
+  JoystickEventHandler joystickEventHandler_;
 
   // Non-report polling state.
   bool pollingMode_ = false;
@@ -114,6 +140,7 @@ private:
   void enumerateDevices();
   void fireButtonEvents(uint16_t deviceId);
   void pollButtonStatus(uint16_t deviceId, uint8_t index);
+  void pollJoysticks();
 };
 
 #endif

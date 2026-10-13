@@ -14,6 +14,9 @@ ChainKeyManager::ChainKeyManager(uint8_t rxPin, uint8_t txPin,
   keyCount_ = 0;
   eventHandler_ = NULL;
   pollingMode_ = false;
+  joystickIds_ = NULL;
+  joystickCount_ = 0;
+  joystickEventHandler_ = NULL;
 }
 
 ChainKeyManager::~ChainKeyManager()
@@ -31,6 +34,11 @@ ChainKeyManager::~ChainKeyManager()
   {
     free(keyIds_);
     keyIds_ = NULL;
+  }
+  if (joystickIds_ != NULL)
+  {
+    free(joystickIds_);
+    joystickIds_ = NULL;
   }
   if (prevStatus_ != NULL)
   {
@@ -51,16 +59,21 @@ bool ChainKeyManager::begin()
   }
 
   enumerateDevices();
-  if (keyCount_ == 0)
+  if (keyCount_ == 0 && joystickCount_ == 0)
   {
-    Serial.println("[ChainKeyManager] no Chain Key device found");
+    Serial.println("[ChainKeyManager] no Chain Key / Joystick device found");
     return false;
   }
 
-  Serial.printf("[ChainKeyManager] found %d key device(s)\r\n", keyCount_);
+  Serial.printf("[ChainKeyManager] found %d key device(s), %d joystick device(s)\r\n",
+                keyCount_, joystickCount_);
   for (uint8_t i = 0; i < keyCount_; i++)
   {
     Serial.printf("  key[%d] id=%d\r\n", i, keyIds_[i]);
+  }
+  for (uint8_t i = 0; i < joystickCount_; i++)
+  {
+    Serial.printf("  joystick[%d] id=%d\r\n", i, joystickIds_[i]);
   }
   return true;
 }
@@ -85,14 +98,20 @@ void ChainKeyManager::enumerateDevices()
     return;
   }
 
-  // Collect every device whose type is Chain Key.
+  // Collect every device whose type is Chain Key or Chain Joystick.
   keyIds_ = (uint16_t *)malloc(sizeof(uint16_t) * deviceNum);
+  joystickIds_ = (uint16_t *)malloc(sizeof(uint16_t) * deviceNum);
   keyCount_ = 0;
+  joystickCount_ = 0;
   for (uint16_t i = 0; i < deviceList_->count; i++)
   {
     if (deviceList_->devices[i].device_type == CHAIN_KEY_TYPE_CODE)
     {
       keyIds_[keyCount_++] = deviceList_->devices[i].id;
+    }
+    else if (deviceList_->devices[i].device_type == CHAIN_JOYSTICK_TYPE_CODE)
+    {
+      joystickIds_[joystickCount_++] = deviceList_->devices[i].id;
     }
   }
 
@@ -109,6 +128,21 @@ uint16_t ChainKeyManager::keyId(uint8_t index) const
   return keyIds_[index];
 }
 
+uint16_t ChainKeyManager::joystickId(uint8_t index) const
+{
+  if (index >= joystickCount_)
+  {
+    return 0;
+  }
+  return joystickIds_[index];
+}
+
+bool ChainKeyManager::getJoystickXY(uint16_t deviceId, int8_t &x, int8_t &y)
+{
+  chain_status_t s = chain_.getJoystickMappedInt8Value(deviceId, &x, &y);
+  return (s == CHAIN_OK);
+}
+
 void ChainKeyManager::update()
 {
   for (uint8_t i = 0; i < keyCount_; i++)
@@ -120,6 +154,26 @@ void ChainKeyManager::update()
     else
     {
       fireButtonEvents(keyIds_[i]);
+    }
+  }
+
+  pollJoysticks();
+}
+
+void ChainKeyManager::pollJoysticks()
+{
+  for (uint8_t i = 0; i < joystickCount_; i++)
+  {
+    int8_t x = 0;
+    int8_t y = 0;
+    if (!getJoystickXY(joystickIds_[i], x, y))
+    {
+      // Query failed; skip this cycle to avoid feeding stale data.
+      continue;
+    }
+    if (joystickEventHandler_ != NULL)
+    {
+      joystickEventHandler_((uint8_t)joystickIds_[i], x, y);
     }
   }
 }
