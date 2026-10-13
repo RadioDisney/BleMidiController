@@ -47,41 +47,6 @@ uint8_t keyId2Pitch[4] =
   72, // key 4 -> MIDI note 65 (F4)
 };
 
-// ---------------------------------------------------------------------------
-// Chain Joystick -> MIDI portamento (滑音)
-//   CC#5  : Portamento Time, 滑音速度 (值越大滑音时间越长 = 滑得越慢)
-//   CC#54 : Portamento Control, 起始音 (值 = 滑音起始音符, 新 NoteOn 从该音滑向目标音)
-//   CC#65 : Portamento On/Off (多数音源需要打开才有滑音效果, 可用宏关闭)
-// ---------------------------------------------------------------------------
-#define MIDI_CC_PORTAMENTO_TIME 5     // CC#5  滑音速度
-#define MIDI_CC_PORTAMENTO_CTRL 54    // CC#54 起始音 (Portamento Control)
-#define MIDI_CC_PORTAMENTO_ONOFF 65   // CC#65 滑音开关
-#define ENABLE_PORTAMENTO_ONOFF_CC 1  // 0 = 只发 CC#5 / CC#54, 不发开关
-
-#define JOY_Y_DEADZONE 16   // 摇杆 Y 轴死区 (映射值 -127..127)
-#define JOY_Y_STEP 120      // 累积步进阈值, 越小滑音速度调整越快
-#define JOY_Y_INVERT 0      // 1 = 翻转上下方向
-
-uint8_t portamentoTime = 0;  // 当前 CC#5 值 (0-127)
-int glideAccum = 0;          // Y 轴偏移累积器
-int lastNote = -1;           // 上一个按下的音符, 作为滑音起始音
-
-// 发送带滑音的 NoteOn: 先用 CC#54 指定起始音 (上一个音符), 再触发新音符,
-// 音源即按 CC#5 设定的速度从起始音滑向新音符.
-void sendGlideNoteOn(midi::DataByte pitch, uint8_t velocity)
-{
-  if (!isConnected)
-  {
-    return;
-  }
-  if (lastNote >= 0 && portamentoTime > 0)
-  {
-    MIDI.sendControlChange(MIDI_CC_PORTAMENTO_CTRL, (midi::DataByte)lastNote, 1);
-  }
-  MIDI.sendNoteOn(pitch, velocity, 1);
-  lastNote = pitch;
-}
-
 void OnChainKey(uint8_t deviceId, ChainKeyEvent event)
 {
   Serial.printf("Chain Key event: deviceId=%d, event=%d\r\n", deviceId, event);
@@ -99,7 +64,10 @@ void OnChainKey(uint8_t deviceId, ChainKeyEvent event)
   // Non-report (polling) mode: the device only returns the raw pressed level
   // via cmd 0xE1, so we get pressed/released edges. Map them to NoteOn/NoteOff.
   case CHAIN_KEY_EVENT_PRESSED:
-    sendGlideNoteOn(pitch, 100);
+    if (isConnected)
+    {
+      MIDI.sendNoteOn(pitch, 100, 1);
+    }
     chainKey.setColor(deviceId, 0x00, 0xFF, 0x00); // green while held
     break;
   case CHAIN_KEY_EVENT_RELEASED:
@@ -110,11 +78,17 @@ void OnChainKey(uint8_t deviceId, ChainKeyEvent event)
     break;
   // Report mode events (kept for when report mode is used):
   case CHAIN_KEY_EVENT_SINGLE_PRESS:
-    sendGlideNoteOn(pitch, 100);
+    if (isConnected)
+    {
+      MIDI.sendNoteOn(pitch, 100, 1);
+    }
     chainKey.setColor(deviceId, 0x00, 0xFF, 0x00); // green
     break;
   case CHAIN_KEY_EVENT_DOUBLE_PRESS:
-    sendGlideNoteOn(pitch + 12, 100);
+    if (isConnected)
+    {
+      MIDI.sendNoteOn(pitch + 12, 100, 1);
+    }
     chainKey.setColor(deviceId, 0x00, 0x00, 0xFF); // blue
     break;
   case CHAIN_KEY_EVENT_LONG_PRESS:
@@ -129,55 +103,67 @@ void OnChainKey(uint8_t deviceId, ChainKeyEvent event)
 }
 
 // ---------------------------------------------------------------------------
-// Chain Joystick: 上下推摇杆 (Y 轴) 调整 CC#5 滑音速度
-// 上推 = 增大滑音时间 (滑得更慢), 下推 = 减小, 松手回中保持当前值.
-// 摇杆 RGB 作为滑音量指示: 0 = 暗红, 127 = 绿.
+// Chain Joystick: 上下推摇杆 (Y 轴) -> MIDI Pitch Bend (弯音轮)
+// 摇杆位置直接对应弯音数值: 回中 = 0 (无弯音), 上推 = 正值 (音升高),
+// 下拉 = 负值 (音降低), 推满 = ±8192 (MIDI 14bit 全量程).
+// 松手摇杆自动回中, 弯音也随之复位为 0.
+// 摇杆 RGB 作为弯音指示: 回中暗白, 上推偏绿, 下拉偏红, 推得越满越亮.
 // ---------------------------------------------------------------------------
+#define JOY_Y_DEADZONE 8          // 摇杆 Y 轴死区 (映射值 -127..127), 死区内视为回中
+#define JOY_Y_INVERT 0            // 1 = 翻转上下方向
+#define JOY_RGB_INTERVAL_MS 100   // RGB 指示更新节流 (ms), 减少串联总线占用
+
+int lastBend = 20000;  // 上次发送的弯音值 (初值取不可能值, 保证首次会发送)
+
 void OnChainJoystick(uint8_t deviceId, int8_t x, int8_t y)
 {
 #if JOY_Y_INVERT
   y = -y;
 #endif
 
-  if (abs(y) < JOY_Y_DEADZONE)
-  {
-    glideAccum = 0;  // 回中, 停止调整但保持当前滑音速度
-    return;
-  }
+  // 死区内钳位为 0 (回中)
+  int yc = (abs(y) < JOY_Y_DEADZONE) ? 0 : (int)y;
 
-  // 按偏移量累积, 推得越满调整越快
-  glideAccum += y;
-  int steps = glideAccum / JOY_Y_STEP;
-  if (steps == 0)
-  {
-    return;
-  }
-  glideAccum -= steps * JOY_Y_STEP;
+  // 摇杆位置 -> 弯音值: y -127..127 线性映射到 MIDI_PITCHBEND_MIN..MAX (中心 0)
+  int bend = (yc * 8192) / 127;
+  bend = constrain(bend, (int)MIDI_PITCHBEND_MIN, (int)MIDI_PITCHBEND_MAX);
 
-  int v = constrain(portamentoTime + steps, 0, 127);
-  if (v == (int)portamentoTime)
+  if (bend == lastBend)
   {
-    glideAccum = 0;  // 已到 0/127 边界, 清累积防止反向突变
-    return;
+    return;  // 数值未变化, 不重复发送
   }
-  portamentoTime = (uint8_t)v;
+  lastBend = bend;
 
-  Serial.printf("Joystick id=%d x=%d y=%d -> CC#%d (portamento time)=%d\r\n",
-                deviceId, x, y, MIDI_CC_PORTAMENTO_TIME, portamentoTime);
+  Serial.printf("Joystick id=%d x=%d y=%d -> Pitch Bend=%d\r\n", deviceId, x, y, bend);
 
   if (isConnected)
   {
-#if ENABLE_PORTAMENTO_ONOFF_CC
-    MIDI.sendControlChange(MIDI_CC_PORTAMENTO_ONOFF,
-                           portamentoTime > 0 ? 127 : 0, 1);
-#endif
-    MIDI.sendControlChange(MIDI_CC_PORTAMENTO_TIME, portamentoTime, 1);
+    MIDI.sendPitchBend(bend, 1);
   }
 
-  // RGB 指示滑音量: 0 = 红, 127 = 绿
-  uint8_t r = (uint8_t)(255 * (127 - portamentoTime) / 127);
-  uint8_t g = (uint8_t)(255 * portamentoTime / 127);
-  chainKey.setColor(deviceId, r, g, 0x00);
+  // RGB 指示弯音方向 (节流更新): 回中暗白, 上推绿, 下拉红
+  static unsigned long lastRgbMs = 0;
+  unsigned long now = millis();
+  if (now - lastRgbMs < JOY_RGB_INTERVAL_MS)
+  {
+    return;
+  }
+  lastRgbMs = now;
+
+  if (bend > 0)
+  {
+    uint8_t g = (uint8_t)map(bend, 1, (int)MIDI_PITCHBEND_MAX, 0x20, 0xFF);
+    chainKey.setColor(deviceId, 0x00, g, 0x00);
+  }
+  else if (bend < 0)
+  {
+    uint8_t r = (uint8_t)map(-bend, 1, -(int)MIDI_PITCHBEND_MIN, 0x20, 0xFF);
+    chainKey.setColor(deviceId, r, 0x00, 0x00);
+  }
+  else
+  {
+    chainKey.setColor(deviceId, 0x20, 0x20, 0x20);
+  }
 }
 
 // -----------------------------------------------------------------------------
@@ -281,9 +267,9 @@ void setup()
     {
       uint16_t id = chainKey.joystickId(i);
       chainKey.setBrightness(id, 30);
-      // 暗红 = 滑音速度当前为 0 (OnChainJoystick 会随调整变绿)
-      chainKey.setColor(id, 0x20, 0x00, 0x00);
-      Serial.printf("Chain Joystick id=%d ready (push up/down to set glide speed)\r\n", id);
+      // 暗白 = 弯音回中 (OnChainJoystick 会随弯音方向变色)
+      chainKey.setColor(id, 0x20, 0x20, 0x20);
+      Serial.printf("Chain Joystick id=%d ready (push up/down to pitch bend)\r\n", id);
     }
   }
 }
@@ -299,7 +285,7 @@ void OnKey(AceButton* button, uint8_t eventType, uint8_t buttonState)
     switch (eventType)
     {
     case AceButton::kEventPressed:
-      sendGlideNoteOn(pitch, 100); 
+      MIDI.sendNoteOn(pitch, 100, 1);
       break;
     case AceButton::kEventReleased:
       MIDI.sendNoteOff(pitch, 0, 1);
