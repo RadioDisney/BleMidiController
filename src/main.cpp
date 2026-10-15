@@ -137,19 +137,19 @@ void OnChainKey(uint8_t deviceId, ChainKeyEvent event)
 }
 
 // ---------------------------------------------------------------------------
-// Chain Joystick: 上下推摇杆 (Y 轴) -> MIDI Pitch Bend (弯音轮)
+// Chain Joystick: 左右推摇杆 (X 轴) -> MIDI Pitch Bend (弯音轮)
 // 摇杆位置映射到 14bit 弯音原始值 (raw 0..16383, 回中 8192):
-//   y = -127 -> 0 (最小弯音), y = 0 -> 8192 (回中), y = 127 -> 16383 (最大弯音).
+//   x = -127 (左推) -> 0 (最小弯音), x = 0 -> 8192 (回中), x = 127 (右推) -> 16383 (最大弯音).
 // 弯音消息共 3 字节: 状态字节 0xEn (n = 通道 0..F, 对应通道 1..16),
 // 数据字节1 = LSB (0x00..0x7F), 数据字节2 = MSB (0x00..0x7F);
 // 原始值 = (MSB << 7) | LSB.
 // 注意: MIDI 库 sendPitchBend(int) 重载接收的是有符号值 -8192..8191 (回中 0),
 // 内部会 +8192 转成原始值再拆 LSB/MSB 发送, 故发送前先做 raw - 8192 转换.
 // 松手摇杆自动回中, 弯音也随之复位为 8192.
-// 摇杆 RGB 作为弯音指示: 回中暗白, 上推偏绿, 下拉偏红, 推得越满越亮.
+// 摇杆 RGB 作为弯音指示: 回中暗白, 右推偏绿 (升音), 左推偏红 (降音), 推得越满越亮.
 // ---------------------------------------------------------------------------
-#define JOY_Y_DEADZONE 8          // 摇杆 Y 轴死区 (映射值 -127..127), 死区内视为回中
-#define JOY_Y_INVERT 0            // 1 = 翻转上下方向
+#define JOY_X_DEADZONE 8          // 摇杆 X 轴死区 (映射值 -127..127), 死区内视为回中
+#define JOY_X_INVERT 0            // 1 = 翻转左右方向
 #define JOY_RGB_INTERVAL_MS 100   // RGB 指示更新节流 (ms), 减少串联总线占用
 
 #define JOY_BEND_MIN 0            // 14bit 弯音原始值下限
@@ -160,18 +160,18 @@ int lastBend = -1;  // 上次发送的弯音原始值 (初值取不可能值, �
 
 void OnChainJoystick(uint8_t deviceId, int8_t x, int8_t y)
 {
-#if JOY_Y_INVERT
-  y = -y;
+#if JOY_X_INVERT
+  x = -x;
 #endif
 
   ESP_LOGD("ChainJoystick", "deviceId=%d x=%d y=%d", deviceId, x, y);
 
   // 死区内钳位为 0 (回中)
-  int yc = (abs(y) < JOY_Y_DEADZONE) ? 0 : (int)y;
+  int xc = (abs(x) < JOY_X_DEADZONE) ? 0 : (int)x;
 
-  // 摇杆位置 -> 14bit 弯音原始值: y -127..127 线性映射到 0..16383 (回中 8192)
-  //   y=-127 -> 0, y=0 -> 8192, y=127 算得 16384 超 14bit, 被 constrain 截到 16383
-  int bend = JOY_BEND_CENTER + (yc * JOY_BEND_CENTER) / 127;
+  // 摇杆位置 -> 14bit 弯音原始值: x -127..127 线性映射到 0..16383 (回中 8192)
+  //   x=-127 -> 0, x=0 -> 8192, x=127 算得 16384 超 14bit, 被 constrain 截到 16383
+  int bend = JOY_BEND_CENTER + (xc * JOY_BEND_CENTER) / 127;
   bend = constrain(bend, JOY_BEND_MIN, JOY_BEND_MAX);
 
   if (bend == lastBend)
@@ -187,10 +187,11 @@ void OnChainJoystick(uint8_t deviceId, int8_t x, int8_t y)
   {
     // 库的 int 重载接收 -8192..8191 (回中 0), 内部 +8192 转回原始值并拆 3 字节:
     // 0xEn | ch, LSB = raw & 0x7F, MSB = (raw >> 7) & 0x7F
-    MIDI.sendPitchBend(bend, midiChannel + 1);
+    // (bend 为原始值 0..16383, 必须先 -8192, 否则回中会发送成最大降音)
+    MIDI.sendPitchBend(bend - JOY_BEND_CENTER, midiChannel + 1);
   }
 
-  // RGB 指示弯音方向 (节流更新): 回中暗白, 上推绿, 下拉红
+  // RGB 指示弯音方向 (节流更新): 回中暗白, 右推绿 (升音), 左推红 (降音)
   static unsigned long lastRgbMs = 0;
   unsigned long now = millis();
   if (now - lastRgbMs < JOY_RGB_INTERVAL_MS)
@@ -206,7 +207,7 @@ void OnChainJoystick(uint8_t deviceId, int8_t x, int8_t y)
   }
   else if (bend < JOY_BEND_CENTER)
   {
-    // 越往下推 raw 越小, 红色越亮: raw 8191 -> 0x20, raw 0 -> 0xFF
+    // 越往左推 raw 越小, 红色越亮: raw 8191 -> 0x20, raw 0 -> 0xFF
     uint8_t r = (uint8_t)map(bend, JOY_BEND_CENTER - 1, JOY_BEND_MIN, 0x20, 0xFF);
     chainKey.setColor(deviceId, r, 0x00, 0x00);
   }
@@ -321,7 +322,7 @@ void setup()
       chainKey.setBrightness(id, 30);
       // 暗白 = 弯音回中 (OnChainJoystick 会随弯音方向变色)
       chainKey.setColor(id, 0x20, 0x20, 0x20);
-      Serial.printf("Chain Joystick id=%d ready (push up/down to pitch bend)\r\n", id);
+      Serial.printf("Chain Joystick id=%d ready (push left/right to pitch bend)\r\n", id);
     }
   }
 }
