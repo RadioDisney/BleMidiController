@@ -20,10 +20,42 @@
 #define SERIAL2_MIDI_RATE 31250
 #define SERIAL_RATE 115200   // 
 
-BLEMIDI_CREATE_DEFAULT_INSTANCE()
+// BLE 广播名称与 PartyPedal 保持一致
+BLEMIDI_CREATE_INSTANCE("PartyPedal", MIDI)
 
 unsigned long t0 = millis();
 bool isConnected = false;
+
+// -----------------------------------------------------------------------------
+// 连接握手协议 (与 PartyPedal 相同):
+// 客户端连接后发送 SysEx: F0 07 30 7F 20 03 CH F7 (CH = MIDI 通道 0-15)
+// 设备解析后将后续所有 MIDI 消息切换到该通道发送。
+// (MIDI Library 通道参数为 1-16, 故发送时使用 midiChannel + 1)
+// -----------------------------------------------------------------------------
+uint8_t midiChannel = 0; // 握手设置的 MIDI 通道 (0-15), 默认 0
+
+void parseHandshakeSysEx(const uint8_t* data, size_t len)
+{
+  // 格式: F0 07 30 7F 20 03 CH F7
+  if (len < 8 || data[0] != 0xF0 || data[len - 1] != 0xF7)
+  {
+    return;
+  }
+
+  if (data[1] == 0x07 && data[2] == 0x30 &&
+      data[3] == 0x7F && data[4] == 0x20 &&
+      data[5] == 0x03)
+  {
+    uint8_t channel = data[6];
+
+    // 通道号范围检查 (0-15)
+    if (channel <= 15)
+    {
+      midiChannel = channel;
+      Serial.printf("[MIDI] Handshake: MIDI channel set to %d\r\n", channel);
+    }
+  }
+}
 
 char bleAddressString[80];
 // Handshake *handshake_;
@@ -66,13 +98,13 @@ void OnChainKey(uint8_t deviceId, ChainKeyEvent event)
   case CHAIN_KEY_EVENT_PRESSED:
     if (isConnected)
     {
-      MIDI.sendNoteOn(pitch, 100, 1);
+      MIDI.sendNoteOn(pitch, 100, midiChannel + 1);
     }
     chainKey.setColor(deviceId, 0x00, 0xFF, 0x00); // green while held
     break;
   case CHAIN_KEY_EVENT_RELEASED:
     if (isConnected) {
-      MIDI.sendNoteOff(pitch, 0, 1);
+      MIDI.sendNoteOff(pitch, 0, midiChannel + 1);
     }
     chainKey.setColor(deviceId, 0x20, 0x20, 0x20); // back to idle
     break;
@@ -80,20 +112,20 @@ void OnChainKey(uint8_t deviceId, ChainKeyEvent event)
   case CHAIN_KEY_EVENT_SINGLE_PRESS:
     if (isConnected)
     {
-      MIDI.sendNoteOn(pitch, 100, 1);
+      MIDI.sendNoteOn(pitch, 100, midiChannel + 1);
     }
     chainKey.setColor(deviceId, 0x00, 0xFF, 0x00); // green
     break;
   case CHAIN_KEY_EVENT_DOUBLE_PRESS:
     if (isConnected)
     {
-      MIDI.sendNoteOn(pitch + 12, 100, 1);
+      MIDI.sendNoteOn(pitch + 12, 100, midiChannel + 1);
     }
     chainKey.setColor(deviceId, 0x00, 0x00, 0xFF); // blue
     break;
   case CHAIN_KEY_EVENT_LONG_PRESS:
     if (isConnected) {
-      MIDI.sendControlChange(123, 0, 1); // all notes off
+      MIDI.sendControlChange(123, 0, midiChannel + 1); // all notes off
     }
     chainKey.setColor(deviceId, 0xFF, 0x00, 0x00); // red
     break;
@@ -138,7 +170,7 @@ void OnChainJoystick(uint8_t deviceId, int8_t x, int8_t y)
 
   if (isConnected)
   {
-    MIDI.sendPitchBend(bend, 1);
+    MIDI.sendPitchBend(bend, midiChannel + 1);
   }
 
   // RGB 指示弯音方向 (节流更新): 回中暗白, 上推绿, 下拉红
@@ -195,6 +227,8 @@ void setup()
                           switch (message.type)
                           {
                           case midi::SystemExclusive:
+                            // PartyPedal 握手协议: 解析通道设置 SysEx
+                            parseHandshakeSysEx((const uint8_t *)message.sysexArray, message.length);
                             Serial.printf("SysEx : ");
                             for (int i = 0; i < message.length; i++)
                             {
@@ -285,10 +319,10 @@ void OnKey(AceButton* button, uint8_t eventType, uint8_t buttonState)
     switch (eventType)
     {
     case AceButton::kEventPressed:
-      MIDI.sendNoteOn(pitch, 100, 1);
+      MIDI.sendNoteOn(pitch, 100, midiChannel + 1);
       break;
     case AceButton::kEventReleased:
-      MIDI.sendNoteOff(pitch, 0, 1);
+      MIDI.sendNoteOff(pitch, 0, midiChannel + 1);
       break;
     default:
       break;
